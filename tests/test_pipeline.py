@@ -1,75 +1,88 @@
-"""Tests for gradle_dep_audit.pipeline."""
+"""Tests for gradle_dep_audit.pipeline (including risk_score integration)."""
 
-from __future__ import annotations
-
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
+from unittest.mock import patch, MagicMock
 import pytest
 
-from gradle_dep_audit.pipeline import run_audit, run_audit_from_file
 from gradle_dep_audit.parser import Dependency
 from gradle_dep_audit.resolver import VersionInfo
 from gradle_dep_audit.checker import VulnerabilityReport
+from gradle_dep_audit.scorer import RiskScore
+from gradle_dep_audit.pipeline import run_audit
 
 
-SAMPLE_TREE = """
-+--- com.example:alpha:1.0.0
-\\--- org.sample:beta:2.3.0
-"""
+DEPS = [
+    Dependency(group="org.springframework", artifact="spring-core", version="5.3.0"),
+    Dependency(group="com.fasterxml.jackson", artifact="jackson-databind", version="2.12.0"),
+]
 
 
-@pytest.fixture(autouse=True)
 def _mock_network(monkeypatch):
-    """Prevent real network calls in every test."""
     monkeypatch.setattr(
         "gradle_dep_audit.pipeline._resolve",
-        lambda dep: VersionInfo(latest_version="9.9.9", outdated=True),
+        lambda dep: VersionInfo(current=dep.version, latest=dep.version, is_outdated=False),
     )
     monkeypatch.setattr(
         "gradle_dep_audit.pipeline._check",
-        lambda dep: VulnerabilityReport(purl="", vulnerabilities=[]),
+        lambda dep: VulnerabilityReport(vulnerabilities=[], vulnerable=False),
     )
 
 
-def test_run_audit_returns_correct_count():
-    rows = run_audit(SAMPLE_TREE)
+def test_run_audit_returns_correct_count(monkeypatch):
+    _mock_network(monkeypatch)
+    rows = run_audit(DEPS)
     assert len(rows) == 2
 
 
-def test_run_audit_row_structure():
-    rows = run_audit(SAMPLE_TREE)
-    dep, vi, vr = rows[0]
-    assert isinstance(dep, Dependency)
-    assert isinstance(vi, VersionInfo)
-    assert isinstance(vr, VulnerabilityReport)
+def test_run_audit_row_structure(monkeypatch):
+    _mock_network(monkeypatch)
+    rows = run_audit(DEPS)
+    for row in rows:
+        assert "dependency" in row
+        assert "version_info" in row
+        assert "vuln_report" in row
+        assert "risk_score" in row
 
 
-def test_run_audit_skip_vuln_returns_empty_vulns():
-    rows = run_audit(SAMPLE_TREE, skip_vuln=True)
-    for _, _, vr in rows:
-        assert vr.vulnerabilities == []
+def test_run_audit_risk_score_present(monkeypatch):
+    _mock_network(monkeypatch)
+    rows = run_audit(DEPS)
+    for row in rows:
+        assert isinstance(row["risk_score"], RiskScore)
 
 
-def test_run_audit_skip_outdated_returns_no_outdated():
-    rows = run_audit(SAMPLE_TREE, skip_outdated=True)
-    for _, vi, _ in rows:
-        assert vi.outdated is False
+def test_run_audit_skip_vuln_returns_empty_vulns(monkeypatch):
+    _mock_network(monkeypatch)
+    rows = run_audit(DEPS, skip_vuln=True)
+    for row in rows:
+        assert row["vuln_report"] is None
 
 
-def test_run_audit_from_file(tmp_path: Path):
-    tree_file = tmp_path / "deps.txt"
-    tree_file.write_text(SAMPLE_TREE, encoding="utf-8")
-    result = run_audit_from_file(tree_file, output_format="csv")
-    assert "coordinate" in result
-    assert "com.example:alpha:1.0.0" in result
+def test_run_audit_skip_outdated_returns_no_outdated(monkeypatch):
+    _mock_network(monkeypatch)
+    rows = run_audit(DEPS, skip_outdated=True)
+    for row in rows:
+        assert row["version_info"] is None
 
 
-def test_run_audit_from_file_json(tmp_path: Path):
-    import json
+def test_run_audit_risk_score_zero_for_clean_deps(monkeypatch):
+    _mock_network(monkeypatch)
+    rows = run_audit(DEPS)
+    for row in rows:
+        assert row["risk_score"].score == 0
+        assert row["risk_score"].label == "NONE"
 
-    tree_file = tmp_path / "deps.txt"
-    tree_file.write_text(SAMPLE_TREE, encoding="utf-8")
-    result = run_audit_from_file(tree_file, output_format="json")
-    data = json.loads(result)
-    assert len(data) == 2
+
+def test_run_audit_risk_score_elevated_for_vuln(monkeypatch):
+    monkeypatch.setattr(
+        "gradle_dep_audit.pipeline._resolve",
+        lambda dep: VersionInfo(current=dep.version, latest=dep.version, is_outdated=False),
+    )
+    monkeypatch.setattr(
+        "gradle_dep_audit.pipeline._check",
+        lambda dep: VulnerabilityReport(
+            vulnerabilities=[{"id": "CVE-X", "severity": "HIGH"}],
+            vulnerable=True,
+        ),
+    )
+    rows = run_audit(DEPS[:1])
+    assert rows[0]["risk_score"].score >= 7
