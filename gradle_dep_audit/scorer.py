@@ -14,6 +14,12 @@ _VULN_LOW_WEIGHT = 1
 _OUTDATED_WEIGHT = 3
 _MAJOR_OUTDATED_BONUS = 4  # extra points when major version is behind
 
+_SEVERITY_WEIGHTS = {
+    "CRITICAL": _VULN_CRITICAL_WEIGHT,
+    "HIGH": _VULN_HIGH_WEIGHT,
+    "MEDIUM": _VULN_MEDIUM_WEIGHT,
+}
+
 
 @dataclass
 class RiskScore:
@@ -36,6 +42,15 @@ class RiskScore:
         return "NONE"
 
 
+def _score_vulnerability(vuln: dict) -> tuple[int, str]:
+    """Return (points, reason) for a single vulnerability entry."""
+    sev = (vuln.get("severity") or "").upper()
+    vuln_id = vuln.get("id", "unknown")
+    weight = _SEVERITY_WEIGHTS.get(sev, _VULN_LOW_WEIGHT)
+    label = sev.capitalize() if sev in _SEVERITY_WEIGHTS else "Low"
+    return weight, f"{label} vulnerability: {vuln_id}"
+
+
 def compute_score(
     version_info: Optional[VersionInfo],
     vuln_report: Optional[VulnerabilityReport],
@@ -46,19 +61,9 @@ def compute_score(
 
     if vuln_report and vuln_report.vulnerabilities:
         for vuln in vuln_report.vulnerabilities:
-            sev = (vuln.get("severity") or "").upper()
-            if sev == "CRITICAL":
-                score += _VULN_CRITICAL_WEIGHT
-                reasons.append(f"Critical vulnerability: {vuln.get('id', 'unknown')}")
-            elif sev == "HIGH":
-                score += _VULN_HIGH_WEIGHT
-                reasons.append(f"High vulnerability: {vuln.get('id', 'unknown')}")
-            elif sev == "MEDIUM":
-                score += _VULN_MEDIUM_WEIGHT
-                reasons.append(f"Medium vulnerability: {vuln.get('id', 'unknown')}")
-            else:
-                score += _VULN_LOW_WEIGHT
-                reasons.append(f"Low vulnerability: {vuln.get('id', 'unknown')}")
+            points, reason = _score_vulnerability(vuln)
+            score += points
+            reasons.append(reason)
 
     if version_info and version_info.is_outdated:
         score += _OUTDATED_WEIGHT
