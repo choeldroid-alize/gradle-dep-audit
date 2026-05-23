@@ -1,70 +1,72 @@
 """Command-line interface for gradle-dep-audit."""
 
+from __future__ import annotations
+
 import argparse
 import sys
-from pathlib import Path
 
-from .parser import parse_dependency_tree
-from .checker import check_vulnerabilities
-from .report import print_report
+from gradle_dep_audit.pipeline import run_audit_from_file
+from gradle_dep_audit.exporter import export
+from gradle_dep_audit.filter import apply_filters
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(
         prog="gradle-dep-audit",
-        description="Scan Gradle dependency trees for outdated or vulnerable packages.",
+        description="Audit Gradle dependency trees for outdated or vulnerable packages.",
     )
-    p.add_argument(
-        "input",
-        metavar="FILE",
-        help="Path to gradle dependency tree text file (use '-' for stdin).",
-    )
-    p.add_argument(
-        "--token",
-        metavar="TOKEN",
-        default=None,
-        help="OSS Index API token for authenticated requests.",
-    )
-    p.add_argument(
-        "--fail-on-vuln",
-        action="store_true",
-        default=False,
-        help="Exit with non-zero status if any vulnerabilities are found.",
-    )
-    p.add_argument(
+    parser.add_argument("dep_file", help="Path to Gradle dependency tree text file.")
+    parser.add_argument(
         "--format",
-        choices=["text", "json"],
+        choices=["text", "json", "csv", "html"],
         default="text",
         help="Output format (default: text).",
     )
-    return p
+    parser.add_argument("--output", "-o", default=None, help="Write output to this file.")
+    parser.add_argument("--skip-vuln", action="store_true", help="Skip vulnerability checks.")
+    parser.add_argument("--skip-outdated", action="store_true", help="Skip outdated checks.")
+
+    # Filter options
+    filter_group = parser.add_argument_group("filters")
+    filter_group.add_argument("--group", default=None, help="Filter by group glob pattern.")
+    filter_group.add_argument("--artifact", default=None, help="Filter by artifact glob pattern.")
+    filter_group.add_argument(
+        "--min-severity",
+        default=None,
+        choices=["low", "medium", "high", "critical"],
+        help="Only show vulnerabilities at or above this severity.",
+    )
+    filter_group.add_argument(
+        "--outdated-only", action="store_true", help="Show only outdated dependencies."
+    )
+    filter_group.add_argument(
+        "--vulnerable-only", action="store_true", help="Show only vulnerable dependencies."
+    )
+    return parser
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.input == "-":
-        text = sys.stdin.read()
-    else:
-        path = Path(args.input)
-        if not path.exists():
-            print(f"Error: file not found: {path}", file=sys.stderr)
-            return 2
-        text = path.read_text(encoding="utf-8")
+    rows = run_audit_from_file(
+        args.dep_file,
+        skip_vuln=args.skip_vuln,
+        skip_outdated=args.skip_outdated,
+    )
 
-    deps = parse_dependency_tree(text)
-    if not deps:
-        print("No dependencies found in input.", file=sys.stderr)
-        return 0
+    rows = apply_filters(
+        rows,
+        group_pattern=args.group,
+        artifact_pattern=args.artifact,
+        min_severity=args.min_severity,
+        outdated_only=args.outdated_only,
+        vulnerable_only=args.vulnerable_only,
+    )
 
-    reports = check_vulnerabilities(deps, token=args.token)
-    print_report(reports, fmt=args.format)
-
-    if args.fail_on_vuln and any(r.is_vulnerable for r in reports):
-        return 1
+    export(rows, fmt=args.format, output_path=args.output)
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())
